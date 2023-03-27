@@ -30,7 +30,7 @@ class StatusDict(TypedDict):
 
 
 def calculate_uptime_downtime(
-        start_datetime: datetime, end_datetime: datetime, helper: StoreBusinessHourHelper
+        start_datetime: datetime, end_datetime: datetime, helper: 'StoreBusinessHourHelper'
 ) -> (timedelta, timedelta):
     """
     Calculate uptime and downtime from start_datetime to end_datetime, if no status for business hours of that day, then
@@ -51,7 +51,9 @@ def calculate_uptime_downtime(
 
     status_index = 0
 
+    # iterate through all business hours in the given time range
     for business_hour in helper.business_hour_generator(start_datetime, end_datetime):
+        # get all statuses of this business hour
         statuses_of_this_business_hour: 'list[StoreStatus]' = []
         while status_index < len(status_list):
             status = status_list[status_index]
@@ -70,10 +72,10 @@ def calculate_uptime_downtime(
             first_status = statuses_of_this_business_hour[0]
             time_diff = time_datetime_difference(business_hour.start_time, first_status.timestamp_utc)
             if first_status.is_active:
-                # store is open
+                # store is open, assume from business hour start time to first status is uptime
                 uptime += time_diff
             else:
-                # store is closed
+                # store is closed, assume from business hour start time to first status is downtime
                 downtime += time_diff
 
             last_status = first_status
@@ -127,17 +129,17 @@ def generate_report(from_datetime_str: str):
 
         business_hour_helper = StoreBusinessHourHelper(store=store)
 
-        uptime_last_hour, downtime_last_hour, th = calculate_uptime_downtime(
+        uptime_last_hour, downtime_last_hour = calculate_uptime_downtime(
             start_datetime=from_datetime - timedelta(hours=1),
             end_datetime=from_datetime,
             helper=business_hour_helper,
         )
-        uptime_last_day, downtime_last_day, td = calculate_uptime_downtime(
+        uptime_last_day, downtime_last_day = calculate_uptime_downtime(
             start_datetime=from_datetime - timedelta(days=1),
             end_datetime=from_datetime,
             helper=business_hour_helper,
         )
-        uptime_last_week, downtime_last_week, tw = calculate_uptime_downtime(
+        uptime_last_week, downtime_last_week = calculate_uptime_downtime(
             start_datetime=from_datetime - timedelta(weeks=1),
             end_datetime=from_datetime,
             helper=business_hour_helper,

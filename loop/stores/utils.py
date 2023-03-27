@@ -1,3 +1,4 @@
+from collections import defaultdict
 from datetime import datetime, time, timedelta
 from typing import TYPE_CHECKING
 
@@ -69,6 +70,9 @@ class StoreBusinessHourHelper:
         def __str__(self):
             return f"{self.start_time} - {self.end_time} on {self.weekday}"
 
+        def __repr__(self):
+            return self.__str__()
+
         class StoreShift:
             def __init__(self, start_datetime: datetime, end_datetime: datetime):
                 assert start_datetime < end_datetime
@@ -81,7 +85,7 @@ class StoreBusinessHourHelper:
         self.always_open = True
 
         # sorted business hours in UTC
-        self.business_hours_utc: 'list[StoreBusinessHourHelper.BusinessHour]' = []
+        self.business_hours_utc: 'dict[int, list[StoreBusinessHourHelper.BusinessHour]]' = defaultdict(list)
 
         temp_day = datetime.today()
         for business_hour in store.business_hours.order_by('day', 'start_time_local'):
@@ -100,26 +104,20 @@ class StoreBusinessHourHelper:
 
             # handle the case when the timezone shifts cause the day change
             if start_time_utc > end_time_utc:
-                self.business_hours_utc.append(
+                self.business_hours_utc[weekday].append(
                     StoreBusinessHourHelper.BusinessHour(start_time_utc, DAY_END, weekday))
-                self.business_hours_utc.append(
+                self.business_hours_utc[(weekday + 1) % 7].append(
                     StoreBusinessHourHelper.BusinessHour(DAY_START, end_time_utc, (weekday + 1) % 7))
             else:
-                self.business_hours_utc.append(
+                self.business_hours_utc[weekday].append(
                     StoreBusinessHourHelper.BusinessHour(start_time_utc, end_time_utc, weekday)
                 )
 
         if self.always_open:
-            for i in range(7):
-                self.business_hours_utc.append(
-                    StoreBusinessHourHelper.BusinessHour(DAY_START, DAY_END, i)
+            for weekday in range(7):
+                self.business_hours_utc[weekday].append(
+                    StoreBusinessHourHelper.BusinessHour(DAY_START, DAY_END, weekday)
                 )
-
-    def get_business_hours(self, day: int, time_: 'datetime.time') -> 'Optional[StoreBusinessHourHelper.BusinessHour]':
-        for business_hour in self.business_hours_utc:
-            if business_hour.weekday == day and business_hour.is_time_within(time_):
-                return business_hour
-        return None
 
     def business_hour_generator(self, start_datetime: datetime, end_datetime: datetime):
         """
@@ -128,13 +126,10 @@ class StoreBusinessHourHelper:
         curr_datetime = start_datetime
         while curr_datetime <= end_datetime:
             curr_time = make_aware(curr_datetime.time(), timezone.utc)
-            for business_hour in self.business_hours_utc:
-                # if the business hour is on the same day
-                if business_hour.weekday == curr_datetime.weekday():
-                    # if the business hour is within the current day
-                    if business_hour.contains(curr_datetime) or (curr_time < business_hour.start_time):
-                        yield business_hour
-                        curr_datetime = datetime.combine(curr_datetime.date(), business_hour.end_time)
+            for business_hour in self.business_hours_utc[curr_datetime.weekday()]:
+                if business_hour.contains(curr_datetime) or (curr_time < business_hour.start_time):
+                    yield business_hour
+                    curr_datetime = datetime.combine(curr_datetime.date(), business_hour.end_time)
 
             curr_datetime = datetime.combine(curr_datetime.date(), DAY_START) + timedelta(days=1)
 
