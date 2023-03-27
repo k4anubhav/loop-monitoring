@@ -1,4 +1,5 @@
 import zoneinfo
+from collections import defaultdict
 from typing import TYPE_CHECKING
 
 from django.core.exceptions import ValidationError
@@ -7,7 +8,7 @@ from django.db.models import Case, Q, When
 from django.db.models.functions import ExtractIsoWeekDay, TruncTime
 
 if TYPE_CHECKING:
-    from reports.utils import StoreBusinessHourHelper
+    from stores.utils import StoreBusinessHourHelper
 
 
 class Store(models.Model):
@@ -59,24 +60,20 @@ class StoreBusinessHour(models.Model):
 
 class StoreStatusQuerySet(models.QuerySet):
     def filter_store_hours(self, helper: 'StoreBusinessHourHelper'):
-        cases = []
-        for weekday, hours in helper.business_hours.items():
-            conditions = None
-            for b_hour in hours:
-                condition = Q(
-                    time__gte=b_hour.start_time,
-                    time__lte=b_hour.end_time,
-                )
-                if conditions is None:
-                    conditions = condition
-                else:
-                    conditions |= condition
+        conditions: 'dict[int, Q]' = defaultdict(lambda: Q())
+        for b_hour in helper.business_hours_utc:
+            condition = Q(
+                time__gte=b_hour.start_time,
+                time__lte=b_hour.end_time,
+            )
+            conditions[b_hour.weekday] |= condition
 
-            # if conditions is empty, then the store is closed on that day
-            if conditions:
-                cases.append(
-                    When(Q(weekday=weekday) & conditions, then=True)
-                )
+        cases: 'list[When]' = []
+        for weekday, condition in conditions.items():
+            cases.append(When(
+                Q(weekday=weekday) & condition,
+                then=True,
+            ))
 
         return self.annotate(
             time=TruncTime('timestamp_utc'),

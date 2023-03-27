@@ -1,6 +1,7 @@
 from uuid import UUID
 
 from celery.result import AsyncResult
+from django.utils import timezone
 from rest_framework import generics
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -14,7 +15,8 @@ class ReportTriggerView(generics.GenericAPIView):
     serializer_class = ReportIdSerializer
 
     def post(self, request: Request, *args, **kwargs):
-        result: AsyncResult = generate_report.delay()
+        from_datetime = timezone.now()
+        result: AsyncResult = generate_report.delay(from_datetime)
         return Response(self.get_serializer({'report_id': result.id}).data)
 
 

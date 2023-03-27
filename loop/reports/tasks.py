@@ -1,16 +1,15 @@
 import csv
 import io
 import logging
-from datetime import timedelta, datetime
-from typing import TypedDict, Optional
+from datetime import datetime, timedelta
+from typing import TypedDict
 
 from celery import shared_task
 from django.core.files.base import ContentFile
-from django.utils import timezone
 
-from stores.models import Store, StoreStatus, StoreBusinessHour
-from .models import StoreReport
-from .utils import make_aware, StoreBusinessHourHelper, time_datetime_difference
+from reports.models import StoreReport
+from stores.models import Store, StoreStatus
+from stores.utils import StoreBusinessHourHelper, time_datetime_difference
 
 logger = logging.getLogger(__name__)
 
@@ -30,152 +29,94 @@ class StatusDict(TypedDict):
     timestamp_utc: datetime
 
 
-class UptimeDowntimeCalculator:
-    def __init__(self):
-        self._uptime: 'Optional[timedelta]' = None
-        self._downtime: 'Optional[timedelta]' = None
+def calculate_uptime_downtime(
+        start_datetime: datetime, end_datetime: datetime, helper: StoreBusinessHourHelper
+) -> (timedelta, timedelta):
+    """
+    Calculate uptime and downtime from start_datetime to end_datetime, if no status for business hours of that day, then
+    consider it as downtime
+    """
+    status_list = list(
+        StoreStatus.objects.filter(
+            store=helper.store,
+            timestamp_utc__gte=start_datetime,
+            timestamp_utc__lte=end_datetime
+        ).filter_store_hours(
+            helper=helper
+        ).order_by('timestamp_utc')
+    )
 
-    @staticmethod
-    def _handle_last_status(
-            last_status: 'StatusDict',
-            last_business_hour: 'StoreBusinessHourHelper.BusinessHour'
-    ) -> 'tuple[timedelta, timedelta]':
-        """
-        Handle the last status of the last business hour
-        """
-        uptime = timedelta()
-        downtime = timedelta()
-        time_diff = time_datetime_difference(last_business_hour.end_time, last_status['timestamp_utc'])
-        if last_status['is_active']:
-            # last status is up, assume from last status to end of business hour is uptime
-            uptime += time_diff
+    uptime = timedelta()
+    downtime = timedelta()
+
+    status_index = 0
+
+    for business_hour in helper.business_hour_generator(start_datetime, end_datetime):
+        statuses_of_this_business_hour: 'list[StoreStatus]' = []
+        while status_index < len(status_list):
+            status = status_list[status_index]
+            if business_hour.contains(status.timestamp_utc):
+                statuses_of_this_business_hour.append(status)
+                status_index += 1
+            else:
+                break
+
+        if len(statuses_of_this_business_hour) == 0:
+            # no status found for this business hour
+            # consider it as downtime
+            downtime += business_hour.duration
         else:
-            # last status is down, assume from last status to end_time is downtime
-            downtime += time_diff
-        return uptime, downtime
+            # handle first status
+            first_status = statuses_of_this_business_hour[0]
+            time_diff = time_datetime_difference(business_hour.start_time, first_status.timestamp_utc)
+            if first_status.is_active:
+                # store is open
+                uptime += time_diff
+            else:
+                # store is closed
+                downtime += time_diff
 
-    @staticmethod
-    def _handle_first_status(
-            crt_status: 'StatusDict',
-            crt_business_hour: 'StoreBusinessHourHelper.BusinessHour'
-    ) -> 'tuple[timedelta, timedelta]':
-        """
-        Handle the first status of the first business hour
-        """
-        uptime = timedelta()
-        downtime = timedelta()
-        time_diff = time_datetime_difference(crt_business_hour.start_time, crt_status['timestamp_utc'])
-        if crt_status['is_active']:
-            # first status is up, assume from start_time to first status is uptime
-            uptime += time_diff
-        else:
-            # first status is down, assume from start_time to first status is downtime
-            downtime += time_diff
-        return uptime, downtime
-
-    @classmethod
-    def calculate_uptime_downtime(
-            cls,
-            start_datetime: 'datetime',
-            end_datetime: 'datetime',
-            helper: 'StoreBusinessHourHelper',
-    ) -> 'tuple[timedelta, timedelta]':
-        uptime = timedelta()
-        downtime = timedelta()
-
-        statuses = (
-            StoreStatus.objects
-            .filter(timestamp_utc__gte=start_datetime, timestamp_utc__lt=end_datetime, store_id=helper.store.store_id)
-            .filter_store_hours(helper=helper)
-            .order_by('timestamp_utc')
-            .values('is_active', 'timestamp_utc')
-        )
-
-        last_status: 'Optional[StatusDict]' = None
-        last_business_hour: 'Optional[StoreBusinessHourHelper.BusinessHour]' = None
-
-        for status in statuses:
-            status: 'StatusDict'
-            status_time = make_aware(status['timestamp_utc'].time(), timezone.utc)
-            last_status_time = make_aware(last_status['timestamp_utc'].time(), timezone.utc) if last_status else None
-
-            business_hour = helper.get_business_hours(status['timestamp_utc'].weekday(), status_time)
-
-            if not business_hour:
-                logger.warning(
-                    f'Should not happen, status {status} is not in any business hour, '
-                    f'but it is in the store hours'
-                )
+            last_status = first_status
+            # handle middle statuses
+            for status in statuses_of_this_business_hour[1:]:
+                time_diff = status.timestamp_utc - last_status.timestamp_utc
+                if last_status.is_active and status.is_active:
+                    # last status is up and current status is up, assume from last status to current status is uptime
+                    uptime += time_diff
+                elif not last_status.is_active and not status.is_active:
+                    # last status is down and current status is down, assume from last status to current status is
+                    # downtime
+                    downtime += time_diff
+                elif last_status.is_active and not status.is_active:
+                    # last status is up and current status is down, assume from last status to current status is
+                    # downtime
+                    downtime += time_diff
+                elif not last_status.is_active and status.is_active:
+                    # last status is down and current status is up, assume from last status to current status is uptime
+                    uptime += time_diff
                 last_status = status
-                last_business_hour = business_hour
-                continue
 
-            if last_business_hour and last_status and business_hour != last_business_hour:
-                # handle the last status of the last business hour
-                uptime_add, downtime_add = cls._handle_last_status(last_status, last_business_hour)
-                uptime += uptime_add
-                downtime += downtime_add
+            # handle last status
+            time_diff = time_datetime_difference(business_hour.end_time, last_status.timestamp_utc)
+            if last_status.is_active:
+                # store is open, assume from last status to end of business hour is uptime
+                uptime += time_diff
+            else:
+                # store is closed, assume from last status to end of business hour is downtime
+                downtime += time_diff
 
-                last_status = None
-
-            # handle the first status of the business hour
-            if not last_status:
-                uptime_add, downtime_add = cls._handle_first_status(status, business_hour)
-                uptime += uptime_add
-                downtime += downtime_add
-
-                last_status = status
-                last_business_hour = business_hour
-                continue
-
-            overlap_start = max(business_hour.start_time, last_status_time)
-            overlap_end = min(business_hour.end_time, status_time)
-
-            # both are in same timezone, no need to handle timezone
-            overlap_duration = timedelta(
-                hours=overlap_end.hour - overlap_start.hour,
-                minutes=overlap_end.minute - overlap_start.minute,
-                seconds=overlap_end.second - overlap_start.second,
-                microseconds=overlap_end.microsecond - overlap_start.microsecond,
-            )
-
-            if last_status['is_active'] and status['is_active']:
-                # last status is up and current status is up, assume from last status to current status is uptime
-                uptime += overlap_duration
-            elif not last_status['is_active'] and not status['is_active']:
-                # last status is down and current status is down, assume from last status to current status is downtime
-                downtime += overlap_duration
-            elif last_status['is_active'] and not status['is_active']:
-                # last status is up and current status is down, assume from last status to current status is downtime
-                downtime += overlap_duration
-            elif not last_status['is_active'] and status['is_active']:
-                # last status is down and current status is up, assume from last status to current status is uptime
-                uptime += overlap_duration
-
-            last_status = status
-            last_business_hour = business_hour
-
-        # handle the last status of the business hour
-        if last_status and last_business_hour:
-            uptime_add, downtime_add = cls._handle_last_status(last_status, last_business_hour)
-            uptime += uptime_add
-            downtime += downtime_add
-        else:
-            # no status is found, assume from start_datetime to end_datetime is downtime
-            downtime += end_datetime - start_datetime
-
-        return uptime, downtime
+    return uptime, downtime
 
 
 @shared_task(name='reports.tasks.generate_report')
-def generate_report():
+def generate_report(from_datetime_str: str):
     """
     Generate report for each store, with uptime and downtime for last hour, last day, and last week
     """
+    from_datetime: 'datetime' = datetime.fromisoformat(from_datetime_str)
 
     reports: 'list[StoreReportDict]' = []
     stores = Store.objects.all()
-    crt = timezone.now()
 
     total_stores = stores.count()
     completed_stores = 0
@@ -183,22 +124,22 @@ def generate_report():
     for store in stores:
         if completed_stores % 100 == 0:
             logger.info(f'Completed {completed_stores} out of {total_stores} stores')
-        business_hours = StoreBusinessHour.objects.filter(store=store)
-        business_hour_helper = StoreBusinessHourHelper(store=store, business_hours=business_hours)
 
-        uptime_last_hour, downtime_last_hour = UptimeDowntimeCalculator.calculate_uptime_downtime(
-            start_datetime=crt - timedelta(hours=1),
-            end_datetime=crt,
+        business_hour_helper = StoreBusinessHourHelper(store=store)
+
+        uptime_last_hour, downtime_last_hour, th = calculate_uptime_downtime(
+            start_datetime=from_datetime - timedelta(hours=1),
+            end_datetime=from_datetime,
             helper=business_hour_helper,
         )
-        uptime_last_day, downtime_last_day = UptimeDowntimeCalculator.calculate_uptime_downtime(
-            start_datetime=crt - timedelta(days=1),
-            end_datetime=crt,
+        uptime_last_day, downtime_last_day, td = calculate_uptime_downtime(
+            start_datetime=from_datetime - timedelta(days=1),
+            end_datetime=from_datetime,
             helper=business_hour_helper,
         )
-        uptime_last_week, downtime_last_week = UptimeDowntimeCalculator.calculate_uptime_downtime(
-            start_datetime=crt - timedelta(weeks=1),
-            end_datetime=crt,
+        uptime_last_week, downtime_last_week, tw = calculate_uptime_downtime(
+            start_datetime=from_datetime - timedelta(weeks=1),
+            end_datetime=from_datetime,
             helper=business_hour_helper,
         )
 
