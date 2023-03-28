@@ -60,7 +60,7 @@ class StoreBusinessHour(models.Model):
 class StoreStatusQuerySet(models.QuerySet):
     def filter_store_hours(self, helper: 'StoreBusinessHourHelper'):
         cases = []
-        for weekday, hours in helper.business_hours_utc.items():
+        for weekday, hours in helper.business_hours.items():
             conditions = None
             for b_hour in hours:
                 condition = Q(

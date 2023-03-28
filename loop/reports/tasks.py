@@ -9,7 +9,7 @@ from django.core.files.base import ContentFile
 
 from reports.models import StoreReport
 from stores.models import Store, StoreStatus
-from stores.utils import StoreBusinessHourHelper, time_datetime_difference
+from stores.utils import StoreBusinessHourHelper
 
 logger = logging.getLogger(__name__)
 
@@ -36,14 +36,12 @@ def calculate_uptime_downtime(
     Calculate uptime and downtime from start_datetime to end_datetime, if no status for business hours of that day, then
     consider it as downtime
     """
-    status_list = list(
-        StoreStatus.objects.filter(
-            store=helper.store,
-            timestamp_utc__gte=start_datetime,
-            timestamp_utc__lte=end_datetime
-        ).filter_store_hours(
-            helper=helper
-        ).order_by('timestamp_utc')
+    status_list: 'list[StatusDict]' = list(
+        StoreStatus.objects
+        .filter(store=helper.store, timestamp_utc__gte=start_datetime, timestamp_utc__lte=end_datetime)
+        .filter_store_hours(helper=helper)
+        .order_by('timestamp_utc')
+        .values('is_active', 'timestamp_utc')
     )
 
     uptime = timedelta()
@@ -52,12 +50,12 @@ def calculate_uptime_downtime(
     status_index = 0
 
     # iterate through all business hours in the given time range
-    for business_hour in helper.business_hour_generator(start_datetime, end_datetime):
+    for shift in helper.shifts_generator(start_datetime, end_datetime):
         # get all statuses of this business hour
-        statuses_of_this_business_hour: 'list[StoreStatus]' = []
+        statuses_of_this_business_hour: 'list[StatusDict]' = []
         while status_index < len(status_list):
             status = status_list[status_index]
-            if business_hour.contains(status.timestamp_utc):
+            if shift.start_datetime <= status['timestamp_utc'] <= shift.end_datetime:
                 statuses_of_this_business_hour.append(status)
                 status_index += 1
             else:
@@ -66,12 +64,12 @@ def calculate_uptime_downtime(
         if len(statuses_of_this_business_hour) == 0:
             # no status found for this business hour
             # consider it as downtime
-            downtime += business_hour.duration
+            downtime += shift.end_datetime - shift.start_datetime
         else:
             # handle first status
             first_status = statuses_of_this_business_hour[0]
-            time_diff = time_datetime_difference(business_hour.start_time, first_status.timestamp_utc)
-            if first_status.is_active:
+            time_diff = first_status['timestamp_utc'] - shift.start_datetime
+            if first_status['is_active']:
                 # store is open, assume from business hour start time to first status is uptime
                 uptime += time_diff
             else:
@@ -81,26 +79,26 @@ def calculate_uptime_downtime(
             last_status = first_status
             # handle middle statuses
             for status in statuses_of_this_business_hour[1:]:
-                time_diff = status.timestamp_utc - last_status.timestamp_utc
-                if last_status.is_active and status.is_active:
+                time_diff = status['timestamp_utc'] - last_status['timestamp_utc']
+                if last_status['is_active'] and status['is_active']:
                     # last status is up and current status is up, assume from last status to current status is uptime
                     uptime += time_diff
-                elif not last_status.is_active and not status.is_active:
+                elif not last_status['is_active'] and not status['is_active']:
                     # last status is down and current status is down, assume from last status to current status is
                     # downtime
                     downtime += time_diff
-                elif last_status.is_active and not status.is_active:
+                elif last_status['is_active'] and not status['is_active']:
                     # last status is up and current status is down, assume from last status to current status is
                     # downtime
                     downtime += time_diff
-                elif not last_status.is_active and status.is_active:
+                elif not last_status['is_active'] and status['is_active']:
                     # last status is down and current status is up, assume from last status to current status is uptime
                     uptime += time_diff
                 last_status = status
 
             # handle last status
-            time_diff = time_datetime_difference(business_hour.end_time, last_status.timestamp_utc)
-            if last_status.is_active:
+            time_diff = shift.end_datetime - last_status['timestamp_utc']
+            if last_status['is_active']:
                 # store is open, assume from last status to end of business hour is uptime
                 uptime += time_diff
             else:

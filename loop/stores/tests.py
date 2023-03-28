@@ -1,10 +1,8 @@
-from datetime import time
-
 from django.test import TestCase
 from django.utils import timezone
 
 from .models import Store, StoreBusinessHour
-from .utils import StoreBusinessHourHelper, DAY_START, DAY_END
+from .utils import StoreBusinessHourHelper
 
 
 class TestBusinessHourGenerator(TestCase):
@@ -39,73 +37,18 @@ class TestBusinessHourGenerator(TestCase):
         })
         self.store_one_day_helper = StoreBusinessHourHelper(store_one_day)
 
-    def test_business_hours_utc(self):
-        # leads to split in business hours
-        hours = {
-            0: [
-                StoreBusinessHourHelper.BusinessHour(
-                    start_time=time(18, 30, tzinfo=timezone.utc),
-                    end_time=DAY_END,
-                    weekday=0
-                ),
-            ],
-            1: [
-                StoreBusinessHourHelper.BusinessHour(
-                    start_time=DAY_START,
-                    end_time=time(18, 29, 59, tzinfo=timezone.utc),
-                    weekday=1
-                ),
-                StoreBusinessHourHelper.BusinessHour(
-                    start_time=time(18, 30, tzinfo=timezone.utc),
-                    end_time=DAY_END,
-                    weekday=1
-                ),
-            ],
-            2: [
-                StoreBusinessHourHelper.BusinessHour(
-                    start_time=DAY_START,
-                    end_time=time(18, 29, 59, tzinfo=timezone.utc),
-                    weekday=2
-                )
-            ],
-        }
-
-        self.assertEqual(dict(self.store_split_helper.business_hours_utc), hours)
-
-        # no business hours, means always open
-        self.assertTrue(self.store_always_open_helper.always_open)
-        always_open_hours = {}
-        for weekday in range(7):
-            always_open_hours[weekday] = [StoreBusinessHourHelper.BusinessHour(
-                DAY_START,
-                DAY_END,
-                weekday
-            )]
-        self.assertEqual(dict(self.store_always_open_helper.business_hours_utc), always_open_hours)
-
-        # check case when store is open one day of the week and closed the other
-        self.assertFalse(self.store_one_day_helper.always_open)
-        one_day_hours = {0: [
-            StoreBusinessHourHelper.BusinessHour(
-                start_time=time(2, 30, tzinfo=timezone.utc),
-                end_time=time(5, 29, 59, tzinfo=timezone.utc),
-                weekday=0
-            )
-        ]}
-        self.assertEqual(dict(self.store_one_day_helper.business_hours_utc), one_day_hours)
-
     def test_business_hour_generator(self):
-        start_time = timezone.datetime(2020, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
-        end_time = timezone.datetime(2020, 1, 7, 23, 59, 59, tzinfo=timezone.utc)
+        start_datetime = timezone.datetime(2020, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+        end_datetime = timezone.datetime(2020, 1, 7, 23, 59, 59, tzinfo=timezone.utc)
 
         # leads to split in business hours
-        hours = list(self.store_split_helper.business_hour_generator(start_time, end_time))
-        self.assertEqual(len(hours), 4)
+        hours = list(self.store_split_helper.shifts_generator(start_datetime, end_datetime))
+        self.assertEqual(len(hours), 2)
 
         # no business hours, means always open
-        hours = list(self.store_always_open_helper.business_hour_generator(start_time, end_time))
+        hours = list(self.store_always_open_helper.shifts_generator(start_datetime, end_datetime))
         self.assertEqual(len(hours), 7)
 
         # check case when store is open one day of the week and closed the other
-        hours = list(self.store_one_day_helper.business_hour_generator(start_time, end_time))
+        hours = list(self.store_one_day_helper.shifts_generator(start_datetime, end_datetime))
         self.assertEqual(len(hours), 1)

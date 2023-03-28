@@ -1,6 +1,6 @@
 from collections import defaultdict
 from datetime import datetime, time, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterator
 
 from django.utils import timezone
 
@@ -13,27 +13,6 @@ DAY_START = time(0, 0, tzinfo=timezone.utc)
 DAY_END = time(23, 59, 59, 999999, tzinfo=timezone.utc)
 
 
-def time_datetime_difference(time_: time, datetime_: datetime) -> timedelta:
-    """
-    Returns the difference between time and datetime
-    """
-    diff = datetime.combine(datetime_.date(), time_) - datetime_
-    if diff.total_seconds() < 0:
-        return -diff
-    return diff
-
-
-def time_time_difference(time1: time, time2: time) -> timedelta:
-    """
-    Returns the difference between two times
-    """
-    today = datetime.today()
-    diff = datetime.combine(today, time1) - datetime.combine(today, time2)
-    if diff.total_seconds() < 0:
-        return -diff
-    return diff
-
-
 class StoreBusinessHourHelper:
     """
     Helper class to handle the business hours of a store
@@ -44,17 +23,6 @@ class StoreBusinessHourHelper:
             self.start_time = start_time
             self.end_time = end_time
             self.weekday = weekday
-
-        @property
-        def duration(self) -> timedelta:
-            return time_time_difference(self.end_time, self.start_time)
-
-        def is_time_within(self, time_: time) -> bool:
-            return self.start_time <= time_ <= self.end_time
-
-        def contains(self, datetime_: datetime) -> bool:
-            return datetime_.weekday() == self.weekday and self.is_time_within(
-                make_aware(datetime_.time(), timezone.utc))
 
         def __eq__(self, other):
             return (
@@ -73,65 +41,51 @@ class StoreBusinessHourHelper:
         def __repr__(self):
             return self.__str__()
 
-        class StoreShift:
-            def __init__(self, start_datetime: datetime, end_datetime: datetime):
-                assert start_datetime < end_datetime
-                assert start_datetime.weekday() == end_datetime.weekday()
-                self.start_datetime = start_datetime
-                self.end_datetime = end_datetime
+    class StoreShift:
+        def __init__(self, start_datetime: datetime, end_datetime: datetime):
+            assert start_datetime < end_datetime
+            assert start_datetime.weekday() == end_datetime.weekday()
+            self.start_datetime = start_datetime
+            self.end_datetime = end_datetime
 
     def __init__(self, store: 'Store'):
         self.store = store
         self.always_open = True
+        self.business_hours: 'dict[int, list[StoreBusinessHourHelper.BusinessHour]]' = defaultdict(list)
 
-        # sorted business hours in UTC
-        self.business_hours_utc: 'dict[int, list[StoreBusinessHourHelper.BusinessHour]]' = defaultdict(list)
-
-        temp_day = datetime.today()
-        for business_hour in store.business_hours.order_by('day', 'start_time_local'):
+        for b_hour in store.business_hours.order_by('day', 'start_time_local') \
+                .values('day', 'start_time_local', 'end_time_local'):
             self.always_open = False
-            # Make `start_time`, `end_time` correct timezone aware
-            start_time_aware = business_hour.start_time_local.replace(tzinfo=self.store.timezone)
-            end_time_aware = business_hour.end_time_local.replace(tzinfo=self.store.timezone)
-
-            # Convert to UTC
-            start_time_utc = make_aware(datetime.combine(temp_day, start_time_aware).astimezone(
-                timezone.utc).time(), timezone.utc)
-            end_time_utc = make_aware(datetime.combine(temp_day, end_time_aware).astimezone(
-                timezone.utc).time(), timezone.utc)
-
-            weekday = business_hour.day
-
-            # handle the case when the timezone shifts cause the day change
-            if start_time_utc > end_time_utc:
-                self.business_hours_utc[weekday].append(
-                    StoreBusinessHourHelper.BusinessHour(start_time_utc, DAY_END, weekday))
-                self.business_hours_utc[(weekday + 1) % 7].append(
-                    StoreBusinessHourHelper.BusinessHour(DAY_START, end_time_utc, (weekday + 1) % 7))
-            else:
-                self.business_hours_utc[weekday].append(
-                    StoreBusinessHourHelper.BusinessHour(start_time_utc, end_time_utc, weekday)
+            self.business_hours[b_hour['day']].append(
+                StoreBusinessHourHelper.BusinessHour(
+                    b_hour['start_time_local'].replace(tzinfo=store.timezone),
+                    b_hour['end_time_local'].replace(tzinfo=store.timezone),
+                    b_hour['day']
                 )
+            )
 
         if self.always_open:
             for weekday in range(7):
-                self.business_hours_utc[weekday].append(
+                self.business_hours[weekday].append(
                     StoreBusinessHourHelper.BusinessHour(DAY_START, DAY_END, weekday)
                 )
 
-    def business_hour_generator(self, start_datetime: datetime, end_datetime: datetime):
+    def shifts_generator(
+            self, start_datetime: datetime, end_datetime: datetime
+    ) -> 'Iterator[StoreBusinessHourHelper.StoreShift]':
         """
-        Generate business hours from start_datetime to end_datetime
+        Generate all shifts between start_datetime and end_datetime
         """
         curr_datetime = start_datetime
         while curr_datetime <= end_datetime:
-            curr_time = make_aware(curr_datetime.time(), timezone.utc)
-            for business_hour in self.business_hours_utc[curr_datetime.weekday()]:
-                if business_hour.contains(curr_datetime) or (curr_time < business_hour.start_time):
-                    yield business_hour
-                    curr_datetime = datetime.combine(curr_datetime.date(), business_hour.end_time)
+            for business_hour in self.business_hours[curr_datetime.weekday()]:
+                shift_start_datetime = datetime.combine(curr_datetime.date(), business_hour.start_time)
+                shift_end_datetime = datetime.combine(curr_datetime.date(), business_hour.end_time)
+                if curr_datetime <= shift_end_datetime:
+                    yield StoreBusinessHourHelper.StoreShift(shift_start_datetime, shift_end_datetime)
+                    curr_datetime = shift_end_datetime
 
             curr_datetime = datetime.combine(curr_datetime.date(), DAY_START) + timedelta(days=1)
 
     def __str__(self):
-        return f"{self.store} - {self.business_hours_utc} - {self.always_open}"
+        return f"{self.store} - {self.business_hours} - {self.always_open}"

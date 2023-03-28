@@ -16,6 +16,8 @@ class ReportTriggerView(generics.GenericAPIView):
 
     def post(self, request: Request, *args, **kwargs):
         from_datetime = timezone.now()
+        # static datetime for testing
+        # from_datetime = timezone.datetime(2023, 3, 23, tzinfo=timezone.utc)
         result: AsyncResult = generate_report.delay(from_datetime)
         return Response(self.get_serializer({'report_id': result.id}).data)
 
